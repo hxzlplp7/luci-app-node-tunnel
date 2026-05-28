@@ -42,19 +42,25 @@ install -Dm 0644 \
     "${WORK_DIR}/root/usr/share/luci/view/node_tunnel.js" \
     "${BUILD_DIR}/data/usr/share/luci/view/node_tunnel.js"
 
-echo "==> [4/6] 正在利用 tar 归档控制域及数据域包 (统一 root 用户及组权限)..."
+echo "==> [4/6] 正在利用 tar 归档控制域及数据域包 (严格去除 ./ 前缀，统一 root 权限)..."
 cd "${BUILD_DIR}/control"
-tar --numeric-owner --group=0 --owner=0 -czf "${BUILD_DIR}/control.tar.gz" .
+# 明确列出打包文件，避免使用 "." 产生带 "./" 前缀的包体
+tar --numeric-owner --group=0 --owner=0 -czf "${BUILD_DIR}/control.tar.gz" control postinst
 
 cd "${BUILD_DIR}/data"
-tar --numeric-owner --group=0 --owner=0 -czf "${BUILD_DIR}/data.tar.gz" .
+# 明确列出打包目录，避免使用 "." 产生带 "./" 前缀的包体
+tar --numeric-owner --group=0 --owner=0 -czf "${BUILD_DIR}/data.tar.gz" etc usr
 
-echo "==> [5/6] 正在写入 debian-binary 规范声明..."
-echo "2.0" > "${BUILD_DIR}/debian-binary"
+echo "==> [5/6] 正在写入确定性 debian-binary 规范声明..."
+# 必须使用 printf 确保没有 CRLF 污染，内容严格为 2.0 加上 Linux 换行符
+printf "2.0\n" > "${BUILD_DIR}/debian-binary"
 
-echo "==> [6/6] 正在利用 ar 命令打包为标准的 .ipk 格式包..."
+echo "==> [6/6] 正在利用 ar 打包为标准的 .ipk 格式包 (严格顺序，不加 s 符号表)..."
 cd "$BUILD_DIR"
-ar rcs "$IPK_OUT" debian-binary control.tar.gz data.tar.gz
+# 警告：绝对不能使用 ar 的 s 参数(创建符号表)，Busybox ar 引擎极其简陋，遇到符号表会报错！
+# 必须严格按照 debian-binary, control.tar.gz, data.tar.gz 的物理顺序进行 ar 归档
+ar rc "$IPK_OUT" debian-binary control.tar.gz data.tar.gz
+
 
 # 清理临时编译残留
 rm -rf "$BUILD_DIR"
