@@ -4,7 +4,7 @@
 set -e
 
 PKG_NAME="luci-app-node-tunnel"
-PKG_VER="1.0.0-1"
+PKG_VER="0.0.1-1"
 WORK_DIR="$(cd "$(dirname "$0")" && pwd)"
 BUILD_DIR="${WORK_DIR}/.build_tmp"
 IPK_OUT="${WORK_DIR}/${PKG_NAME}_${PKG_VER}_all.ipk"
@@ -21,6 +21,9 @@ cp "${WORK_DIR}/ipkg/control"  "$CTRL_DIR/control"
 cp "${WORK_DIR}/ipkg/postinst" "$CTRL_DIR/postinst"
 chmod 0755 "$CTRL_DIR/postinst"
 
+# 强制转换为 Unix 换行符 (LF)，避免在 Windows 平台拉取代码导致换行符变成 CRLF 从而引起 opkg 解析失败
+find "$CTRL_DIR" -type f -exec sed -i 's/\r$//' {} +
+
 # ── 准备 data 目录（还原路由器上的安装目录结构）────────────────────────────
 echo "==> [3/6] 准备 data 文件树..."
 DATA_DIR="${BUILD_DIR}/data_dir"
@@ -34,6 +37,9 @@ install -Dm0644 "${WORK_DIR}/root/usr/share/luci/menu.d/luci-app-node-tunnel.jso
                 "${DATA_DIR}/usr/share/luci/menu.d/luci-app-node-tunnel.json"
 install -Dm0644 "${WORK_DIR}/root/usr/share/luci/view/node_tunnel.js" \
                 "${DATA_DIR}/usr/share/luci/view/node_tunnel.js"
+
+# 强制转换为 Unix 换行符 (LF)，避免在 Windows 平台拉取代码导致换行符变成 CRLF 从而引起 opkg 解析失败
+find "$DATA_DIR" -type f -exec sed -i 's/\r$//' {} +
 
 # ── 创建三个标准组件（严格按照 opkg-build 格式要求）─────────────────────────
 echo "==> [4/6] 创建 tar 归档..."
@@ -55,7 +61,12 @@ echo "==> [6/6] 打包 .ipk..."
 cd "$BUILD_DIR"
 # 关键点3：ar 成员名必须使用 ./xxx 前缀，这是 opkg 解析器硬编码的期望格式
 # 关键点4：不使用 s 标志（不生成符号索引）以避免 BusyBox ar 解析失败
-ar cr "$IPK_OUT" ./debian-binary ./control.tar.gz ./data.tar.gz
+# 关键点5：智能检测 ar 工具对 -D 确定性模式的支持，擦除打包者 UID/GID 与时间戳，规避格式错误
+if ar --help 2>&1 | grep -q -- "-D"; then
+    ar crD "$IPK_OUT" ./debian-binary ./control.tar.gz ./data.tar.gz
+else
+    ar cr "$IPK_OUT" ./debian-binary ./control.tar.gz ./data.tar.gz
+fi
 
 # 清理
 rm -rf "$BUILD_DIR"

@@ -1,5 +1,5 @@
 Package: luci-app-node-tunnel
-Version: 1.0.0-1
+Version: 0.0.1-1
 Depends: libc, luci-base, luci-compat, cloudflared, frpc
 Source: feeds/luci/applications/luci-app-node-tunnel
 SourceName: luci-app-node-tunnel

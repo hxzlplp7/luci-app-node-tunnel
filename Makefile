@@ -1,7 +1,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=luci-app-node-tunnel
-PKG_VERSION:=1.0.0
+PKG_VERSION:=0.0.1
 PKG_RELEASE:=1
 PKG_MAINTAINER:=node-tunnel
 PKG_LICENSE:=MIT
