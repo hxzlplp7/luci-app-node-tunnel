@@ -1,6 +1,5 @@
 name: Build and Release IPK
 
-# 当推送 v 开头的版本标签时自动触发编译与打包发布
 on:
   push:
     tags:
@@ -15,24 +14,57 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: 检出项目源代码
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
-      - name: 安装打包必需的系统组件
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y binutils tar gzip
+      - name: 安装打包依赖
+        run: sudo apt-get update && sudo apt-get install -y binutils
 
-      - name: 执行一键打包脚本
+      - name: 执行打包脚本
         run: |
           chmod +x build_ipk.sh
           ./build_ipk.sh
 
-      - name: 创建 GitHub Release 并上传 .ipk 资产包
-        uses: softprops/action-gh-release@v1
+      - name: 验证 ipk 包结构
+        run: |
+          echo "--- ar 成员列表 ---"
+          ar t luci-app-node-tunnel_1.0.0-1_all.ipk
+          echo "--- debian-binary 内容 ---"
+          ar p luci-app-node-tunnel_1.0.0-1_all.ipk debian-binary || ar p luci-app-node-tunnel_1.0.0-1_all.ipk ./debian-binary
+          echo "--- control.tar.gz 内容 ---"
+          ar p luci-app-node-tunnel_1.0.0-1_all.ipk control.tar.gz 2>/dev/null | tar tzf - || \
+          ar p luci-app-node-tunnel_1.0.0-1_all.ipk ./control.tar.gz | tar tzf -
+          echo "--- data.tar.gz 内容 ---"
+          ar p luci-app-node-tunnel_1.0.0-1_all.ipk data.tar.gz 2>/dev/null | tar tzf - || \
+          ar p luci-app-node-tunnel_1.0.0-1_all.ipk ./data.tar.gz | tar tzf -
+          echo "--- 文件大小 ---"
+          ls -la luci-app-node-tunnel_1.0.0-1_all.ipk
+
+      - name: 删除旧 Release（如果存在）
+        run: |
+          gh release delete "${{ github.ref_name }}" --yes --cleanup-tag || true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 创建 GitHub Release 并上传 .ipk
+        uses: softprops/action-gh-release@v2
         with:
           files: luci-app-node-tunnel_1.0.0-1_all.ipk
           name: Release ${{ github.ref_name }}
+          tag_name: ${{ github.ref_name }}
           draft: false
           prerelease: false
+          body: |
+            ## luci-app-node-tunnel ${{ github.ref_name }}
+
+            OpenWrt 路由器节点隧道穿透插件首个发行版本。
+
+            ### 安装方法
+            ```bash
+            # 上传到路由器
+            scp luci-app-node-tunnel_1.0.0-1_all.ipk root@<路由器IP>:/tmp/
+
+            # SSH 登录路由器执行安装
+            opkg install /tmp/luci-app-node-tunnel_1.0.0-1_all.ipk
+            ```
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
