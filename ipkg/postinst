@@ -1,0 +1,13 @@
+#!/bin/sh
+
+# 重启 uhttpd 服务以加载新的 LuCI 应用程序
+if [ -x /etc/init.d/uhttpd ]; then
+    /etc/init.d/uhttpd restart 2>/dev/null || true
+fi
+
+# 启用并启动服务
+if [ -x /etc/init.d/node_tunnel ]; then
+    /etc/init.d/node_tunnel enable
+fi
+
+exit 0

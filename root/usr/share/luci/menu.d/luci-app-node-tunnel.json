@@ -1,0 +1,11 @@
+{
+  "admin/services/node-tunnel": {
+    "title": "Node Tunnel",
+    "order": 60,
+    "action": {
+      "type": "view",
+      "path": "node_tunnel"
+    },
+    "icon": "img/icons/node-tunnel.png"
+  }
+}

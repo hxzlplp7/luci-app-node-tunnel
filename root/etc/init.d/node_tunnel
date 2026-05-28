@@ -1,0 +1,455 @@
+#!/bin/sh /etc/rc.common
+# Copyright (C) 2024 node-tunnel contributors
+# Node Tunnel - Procd 启动管理脚本
+
+USE_PROCD=1
+START=90
+STOP=10
+
+PROG_SINGBOX="/usr/bin/sing-box"
+PROG_XRAY="/usr/bin/xray"
+PROG_CLOUDFLARED="/usr/bin/cloudflared"
+PROG_FRPC="/usr/bin/frpc"
+
+NAME="node_tunnel"
+UCI_CONF="node_tunnel"
+
+# ── 辅助函数：读取 UCI 参数并在无值时返回默认值 ───────────────────────────────────────────
+_uci() { uci -q get "${UCI_CONF}.$1" 2>/dev/null; }
+
+# ── 生成 sing-box / xray 配置文件 ──────────────────────────────────────────
+gen_node_config() {
+    local core="$1"
+    local proto="$2"
+    local listen_addr="$3"
+    local listen_port="$4"
+    local http_port="$5"
+    local username="$6"
+    local password="$7"
+    local config_path="$8"
+
+    mkdir -p "$(dirname "$config_path")"
+
+    if [ "$core" = "xray" ]; then
+        # ── 生成 xray JSON 配置文件 ────────────────────────────────────────
+        local inbounds=""
+
+        if [ "$proto" = "socks5" ] || [ "$proto" = "both" ]; then
+            local auth_section=""
+            if [ -n "$username" ] && [ -n "$password" ]; then
+                auth_section='"auth": "password","accounts": [{"user": "'"$username"'","pass": "'"$password"'"}],'
+            fi
+            inbounds="${inbounds}{\"tag\":\"socks-in\",\"protocol\":\"socks\",\"listen\":\"${listen_addr}\",\"port\":${listen_port},\"settings\":{${auth_section}\"udp\":true}},"
+        fi
+
+        if [ "$proto" = "http" ] || [ "$proto" = "both" ]; then
+            local auth_http=""
+            if [ -n "$username" ] && [ -n "$password" ]; then
+                auth_http='"accounts": [{"user": "'"$username"'","pass": "'"$password"'"}],'
+            fi
+            inbounds="${inbounds}{\"tag\":\"http-in\",\"protocol\":\"http\",\"listen\":\"${listen_addr}\",\"port\":${http_port},\"settings\":{${auth_http}\"allowTransparent\":false}},"
+        fi
+
+        # 移除末尾多余的逗号
+        inbounds="${inbounds%,}"
+
+        cat > "$config_path" <<EOF
+{
+  "log": {"loglevel": "warning"},
+  "inbounds": [${inbounds}],
+  "outbounds": [
+    {"tag": "direct","protocol": "freedom","settings": {}},
+    {"tag": "blocked","protocol": "blackhole","settings": {}}
+  ],
+  "routing": {
+    "rules": [
+      {"type": "field","ip": ["geoip:private"],"outboundTag": "direct"},
+      {"type": "field","outboundTag": "direct","network": "tcp,udp"}
+    ]
+  }
+}
+EOF
+
+    else
+        # ── 生成 sing-box JSON 配置文件 ─────────────────────────────────────
+        local inbounds_sb=""
+
+        if [ "$proto" = "socks5" ] || [ "$proto" = "both" ]; then
+            local users_sb="[]"
+            if [ -n "$username" ] && [ -n "$password" ]; then
+                users_sb="[{\"username\":\"${username}\",\"password\":\"${password}\"}]"
+            fi
+            inbounds_sb="${inbounds_sb}{\"type\":\"socks\",\"tag\":\"socks-in\",\"listen\":\"${listen_addr}\",\"listen_port\":${listen_port},\"users\":${users_sb}},"
+        fi
+
+        if [ "$proto" = "http" ] || [ "$proto" = "both" ]; then
+            local users_http="[]"
+            if [ -n "$username" ] && [ -n "$password" ]; then
+                users_http="[{\"username\":\"${username}\",\"password\":\"${password}\"}]"
+            fi
+            inbounds_sb="${inbounds_sb}{\"type\":\"http\",\"tag\":\"http-in\",\"listen\":\"${listen_addr}\",\"listen_port\":${http_port},\"users\":${users_http}},"
+        fi
+
+        # 移除末尾多余的逗号
+        inbounds_sb="${inbounds_sb%,}"
+
+        cat > "$config_path" <<EOF
+{
+  "log": {"level": "warn","timestamp": true},
+  "inbounds": [${inbounds_sb}],
+  "outbounds": [
+    {"type": "direct","tag": "direct"},
+    {"type": "block","tag": "block"}
+  ],
+  "route": {
+    "rules": [
+      {"ip_is_private": true,"outbound": "direct"}
+    ],
+    "final": "direct"
+  }
+}
+EOF
+    fi
+
+    logger -t node_tunnel "已生成 ${core} 配置文件: $config_path"
+}
+
+# ── 生成 frpc TOML 格式配置文件 ─────────────────────────────────────────────────
+gen_frpc_config() {
+    local server_addr="$1"
+    local server_port="$2"
+    local auth_token="$3"
+    local tunnel_type="$4"
+    local local_addr="$5"
+    local local_port="$6"
+    local remote_port="$7"
+    local subdomain="$8"
+    local custom_domain="$9"
+    local config_path="${10}"
+
+    mkdir -p "$(dirname "$config_path")"
+
+    cat > "$config_path" <<EOF
+# frpc TOML 配置 - 由 node_tunnel 插件自动生成
+serverAddr = "${server_addr}"
+serverPort = ${server_port}
+
+auth.method = "token"
+auth.token = "${auth_token}"
+
+log.to = "/var/log/node_tunnel_frpc.log"
+log.level = "warn"
+log.maxDays = 3
+
+EOF
+
+    if [ "$tunnel_type" = "tcp" ]; then
+        cat >> "$config_path" <<EOF
+[[proxies]]
+name = "node-tunnel-tcp"
+type = "tcp"
+localIP = "${local_addr}"
+localPort = ${local_port}
+remotePort = ${remote_port}
+EOF
+    elif [ "$tunnel_type" = "http" ]; then
+        cat >> "$config_path" <<EOF
+[[proxies]]
+name = "node-tunnel-http"
+type = "http"
+localIP = "${local_addr}"
+localPort = ${local_port}
+EOF
+        [ -n "$subdomain" ]    && echo "subdomain = \"${subdomain}\""     >> "$config_path"
+        [ -n "$custom_domain" ] && echo "customDomains = [\"${custom_domain}\"]" >> "$config_path"
+
+    elif [ "$tunnel_type" = "https" ]; then
+        cat >> "$config_path" <<EOF
+[[proxies]]
+name = "node-tunnel-https"
+type = "https"
+localIP = "${local_addr}"
+localPort = ${local_port}
+EOF
+        [ -n "$subdomain" ]    && echo "subdomain = \"${subdomain}\""     >> "$config_path"
+        [ -n "$custom_domain" ] && echo "customDomains = [\"${custom_domain}\"]" >> "$config_path"
+
+    elif [ "$tunnel_type" = "udp" ]; then
+        cat >> "$config_path" <<EOF
+[[proxies]]
+name = "node-tunnel-udp"
+type = "udp"
+localIP = "${local_addr}"
+localPort = ${local_port}
+remotePort = ${remote_port}
+EOF
+    fi
+
+    logger -t node_tunnel "已生成 frpc 配置文件: $config_path (类型为 ${tunnel_type})"
+}
+
+# ── Argo 临时隧道域名提取监听器（后台运行，提取并保存 trycloudflare 分配的公网 URL） ─────────────────
+start_argo_url_watcher() {
+    local log_file="$1"
+    local url_file="$2"
+
+    # 清理旧的缓存状态
+    rm -f "$url_file"
+    mkdir -p "$(dirname "$url_file")"
+
+    # 后台线程：定时轮询日志文件，匹配公网 URL
+    (
+        local retries=0
+        while [ $retries -lt 60 ]; do
+            sleep 2
+            retries=$((retries + 1))
+
+            if [ ! -f "$log_file" ]; then
+                continue
+            fi
+
+            # 从 cloudflared 输出的日志中正则提取 trycloudflare.com 的 URL 链接
+            local url
+            url=$(grep -oE 'https://[a-zA-Z0-9\-]+\.trycloudflare\.com' "$log_file" | tail -1)
+
+            if [ -n "$url" ]; then
+                echo "$url" > "$url_file"
+                logger -t node_tunnel "已成功捕获 Argo 临时域名: $url"
+                break
+            fi
+        done
+
+        if [ ! -f "$url_file" ]; then
+            echo "UNAVAILABLE" > "$url_file"
+            logger -t node_tunnel "Argo 临时域名: 超时 120 秒仍未能提取到可用 URL"
+        fi
+    ) &
+}
+
+# ── Procd 托管服务：本地代理节点 (sing-box / xray) ───────────────────────────────
+start_node_service() {
+    local enabled core proto listen_addr listen_port http_port username password config_path
+
+    enabled=$(_uci node.enabled)
+    [ "$enabled" = "1" ] || return 0
+
+    core=$(_uci node.core)
+    proto=$(_uci node.protocol)
+    listen_addr=$(_uci node.listen_addr)
+    listen_port=$(_uci node.listen_port)
+    http_port=$(_uci node.http_port)
+    username=$(_uci node.username)
+    password=$(_uci node.password)
+    config_path=$(_uci node.config_path)
+
+    # 赋予默认值
+    core="${core:-sing-box}"
+    proto="${proto:-socks5}"
+    listen_addr="${listen_addr:-0.0.0.0}"
+    listen_port="${listen_port:-1080}"
+    http_port="${http_port:-1081}"
+    config_path="${config_path:-/var/etc/node_tunnel_node.json}"
+
+    # 检测并选择二进制执行文件
+    local bin
+    if [ "$core" = "xray" ]; then
+        bin="$PROG_XRAY"
+    else
+        bin="$PROG_SINGBOX"
+        core="sing-box"
+    fi
+
+    if [ ! -x "$bin" ]; then
+        logger -t node_tunnel "错误: 未找到或无法执行 $bin"
+        return 1
+    fi
+
+    # 动态生成配置文件
+    gen_node_config "$core" "$proto" "$listen_addr" "$listen_port" "$http_port" \
+                    "$username" "$password" "$config_path"
+
+    # 使用 Procd 注册服务实例并监控
+    procd_open_instance "node"
+    procd_set_param command "$bin" run -c "$config_path"
+    procd_set_param respawn 3 5 0
+    procd_set_param stdout 0
+    procd_set_param stderr 1
+    procd_set_param pidfile "/var/run/node_tunnel_node.pid"
+    procd_append_param env "XRAY_LOCATION_ASSET=/usr/share/xray"
+    procd_close_instance
+}
+
+# ── Procd 托管服务：Cloudflare Argo 隧道 ──────────────────────────────────────────
+start_argo_service() {
+    local enabled mode token tunnel_name target_type target_addr target_port \
+          target_proto http_hostname url_file log_file
+
+    enabled=$(_uci argo.enabled)
+    [ "$enabled" = "1" ] || return 0
+
+    [ -x "$PROG_CLOUDFLARED" ] || {
+        logger -t node_tunnel "错误: 未检测到 cloudflared 执行文件"
+        return 1
+    }
+
+    mode=$(_uci argo.mode)
+    token=$(_uci argo.token)
+    tunnel_name=$(_uci argo.tunnel_name)
+    target_type=$(_uci argo.target_type)
+    target_addr=$(_uci argo.target_addr)
+    target_port=$(_uci argo.target_port)
+    target_proto=$(_uci argo.target_proto)
+    http_hostname=$(_uci argo.http_hostname)
+    url_file=$(_uci argo.url_file)
+    log_file=$(_uci argo.log_file)
+
+    mode="${mode:-quick}"
+    url_file="${url_file:-/var/run/node_tunnel_argo.url}"
+    log_file="${log_file:-/var/log/node_tunnel_argo.log}"
+
+    # 构造反代的本地目标 URL 地址
+    local target_url
+    if [ "$target_type" = "admin" ]; then
+        target_url="http://127.0.0.1:80"
+    else
+        target_proto="${target_proto:-socks5}"
+        target_addr="${target_addr:-127.0.0.1}"
+        target_port="${target_port:-1080}"
+        target_url="${target_proto}://${target_addr}:${target_port}"
+    fi
+
+    mkdir -p "$(dirname "$log_file")"
+    mkdir -p "$(dirname "$url_file")"
+    > "$log_file"
+
+    procd_open_instance "argo"
+
+    if [ "$mode" = "token" ] && [ -n "$token" ]; then
+        # 永久隧道模式 (使用用户提供的 Token 进行长连接启动)
+        procd_set_param command "$PROG_CLOUDFLARED" \
+            tunnel --no-autoupdate run --token "$token"
+    else
+        # 临时隧道模式 (Quick Tunnel，需捕获输出以读取动态域名)
+        procd_set_param command "$PROG_CLOUDFLARED" \
+            tunnel --no-autoupdate --url "$target_url" \
+            --logfile "$log_file" --loglevel warn
+        # 启动后台监听器在几秒后从日志中匹配临时公网域名
+        start_argo_url_watcher "$log_file" "$url_file"
+    fi
+
+    procd_set_param respawn 5 10 0
+    procd_set_param stdout 0
+    procd_set_param stderr 1
+    procd_set_param pidfile "/var/run/node_tunnel_argo.pid"
+    procd_close_instance
+}
+
+# ── Procd 托管服务：frpc 客户端 ───────────────────────────────────────────────────────
+start_frp_service() {
+    local enabled server_addr server_port auth_token tunnel_type \
+          local_addr local_port remote_port subdomain custom_domain config_path
+
+    enabled=$(_uci frp.enabled)
+    [ "$enabled" = "1" ] || return 0
+
+    [ -x "$PROG_FRPC" ] || {
+        logger -t node_tunnel "错误: 未检测到 frpc 执行文件"
+        return 1
+    }
+
+    server_addr=$(_uci frp.server_addr)
+    server_port=$(_uci frp.server_port)
+    auth_token=$(_uci frp.auth_token)
+    tunnel_type=$(_uci frp.tunnel_type)
+    local_addr=$(_uci frp.local_addr)
+    local_port=$(_uci frp.local_port)
+    remote_port=$(_uci frp.remote_port)
+    subdomain=$(_uci frp.subdomain)
+    custom_domain=$(_uci frp.custom_domain)
+    config_path=$(_uci frp.config_path)
+
+    [ -n "$server_addr" ] || {
+        logger -t node_tunnel "错误: 未配置 frp 服务器地址"
+        return 1
+    }
+
+    server_port="${server_port:-7000}"
+    tunnel_type="${tunnel_type:-tcp}"
+    local_addr="${local_addr:-127.0.0.1}"
+    local_port="${local_port:-1080}"
+    remote_port="${remote_port:-6000}"
+    config_path="${config_path:-/var/etc/node_tunnel_frpc.toml}"
+
+    # 生成 frpc 配置文件
+    gen_frpc_config "$server_addr" "$server_port" "$auth_token" \
+                    "$tunnel_type" "$local_addr" "$local_port" \
+                    "$remote_port" "$subdomain" "$custom_domain" \
+                    "$config_path"
+
+    # 使用 Procd 注册服务实例并监控
+    procd_open_instance "frp"
+    procd_set_param command "$PROG_FRPC" -c "$config_path"
+    procd_set_param respawn 3 5 0
+    procd_set_param stdout 0
+    procd_set_param stderr 1
+    procd_set_param pidfile "/var/run/node_tunnel_frpc.pid"
+    procd_close_instance
+}
+
+# ── rc.common 钩子与生命周期管理 ───────────────────────────────────────────────────────────
+start_service() {
+    local global_enabled
+    global_enabled=$(_uci global.enabled)
+
+    if [ "$global_enabled" != "1" ]; then
+        logger -t node_tunnel "全局开关已关闭，服务不启动。"
+        return 0
+    fi
+
+    logger -t node_tunnel "正在启动 Node Tunnel 所有子服务..."
+    start_node_service
+    start_argo_service
+    start_frp_service
+}
+
+stop_service() {
+    logger -t node_tunnel "正在停止 Node Tunnel 所有服务并清理缓存状态..."
+    # 停止时清除临时 URL 的文件
+    rm -f /var/run/node_tunnel_argo.url
+}
+
+service_triggers() {
+    # 注册配置热加载触发器，当 UCI 配置改变时重载
+    procd_add_reload_trigger "$UCI_CONF"
+}
+
+reload_service() {
+    logger -t node_tunnel "正在重新加载服务配置..."
+    stop_service
+    start_service
+}
+
+# ── 状态查询辅助接口（允许 LuCI 面板通过 shell / ubus 快速获取服务状态） ──────────────────────────
+status_service() {
+    echo "=== Node Tunnel 状态列表 ==="
+
+    for svc in node argo frp; do
+        local pidfile="/var/run/node_tunnel_${svc}.pid"
+        if [ -f "$pidfile" ]; then
+            local pid
+            pid=$(cat "$pidfile")
+            if kill -0 "$pid" 2>/dev/null; then
+                echo "${svc}: 运行中 (PID $pid)"
+            else
+                echo "${svc}: 僵死 (Stale PID $pid)"
+            fi
+        else
+            echo "${svc}: 已停止"
+        fi
+    done
+
+    local url_file="/var/run/node_tunnel_argo.url"
+    if [ -f "$url_file" ]; then
+        echo "Argo 临时域名: $(cat "$url_file")"
+    fi
+}

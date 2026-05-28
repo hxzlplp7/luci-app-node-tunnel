@@ -1,0 +1,12 @@
+Package: luci-app-node-tunnel
+Version: 1.0.0-1
+Depends: libc, luci-base, luci-compat, cloudflared, frpc
+Source: feeds/luci/applications/luci-app-node-tunnel
+SourceName: luci-app-node-tunnel
+License: MIT
+Section: luci
+Architecture: all
+Installed-Size: 32000
+Description: LuCI frontend for Node Tunnel - local proxy (sing-box/xray) with Argo and FRP reverse proxy publishing.
+ Supports both Cloudflare Argo Quick Tunnel (no account required) and Permanent Tunnel
+ (via token), plus FRP TCP/HTTP/HTTPS/UDP tunnels.
