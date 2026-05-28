@@ -1,0 +1,38 @@
+name: Build and Release IPK
+
+# 当推送 v 开头的版本标签时自动触发编译与打包发布
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build OpenWrt IPK and Create GitHub Release
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出项目源代码
+        uses: actions/checkout@v3
+
+      - name: 安装打包必需的系统组件
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y binutils tar gzip
+
+      - name: 执行一键打包脚本
+        run: |
+          chmod +x build_ipk.sh
+          ./build_ipk.sh
+
+      - name: 创建 GitHub Release 并上传 .ipk 资产包
+        uses: softprops/action-gh-release@v1
+        with:
+          files: luci-app-node-tunnel_1.0.0-1_all.ipk
+          name: Release ${{ github.ref_name }}
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
